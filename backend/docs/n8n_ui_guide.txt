@@ -1,0 +1,301 @@
+1. Getting Started: UI and Workflow Basics
+1.1 Launching n8n and the Canvas
+
+Open your n8n instance (Cloud or self-hosted).
+
+When you create a new workflow, you arrive at the canvas: empty space where you will place nodes.
+
+On the left (or via a big “+ Add first step” button) you’ll see the nodes panel: you can search or browse for nodes. 
+n8n Docs
++1
+
+When you click “Add first step”, the panel opens showing trigger nodes (nodes that start the workflow) by default. 
+n8n Docs
+
+1.2 Adding Nodes
+
+Click Add first step → nodes panel → type in search bar the name of a node (for example: “Webhook”).
+
+Press Enter (or click the node) to add it to the canvas.
+
+After the first, adding further nodes: hover over a node, the small connector “+” appears → click it → search bar opens → type next node → Enter → node added.
+
+Or you can drag a node from the panel to the canvas and then wire the output of one node into the input of the next.
+
+Each node is represented by a box on canvas, with input(s) on left, output(s) on right, arrows show flow of data.
+
+1.3 Node Types: Trigger vs Action
+
+A Trigger node: starts the workflow when something happens (e.g., HTTP request, schedule). 
+n8n Docs
++1
+
+An Action node: performs a task (send email, HTTP request, transform data) as part of the flow. 
+n8n Docs
++1
+
+On the search panel, trigger nodes are typically marked (bolt icon). 
+n8n Docs
++1
+
+1.4 Node Settings & Controls
+
+Hover on a node: you’ll see icons such as “Run this step”, “Deactivate node”, “Delete node”. 
+n8n Docs
+
+Click the node to open its Settings tab: here you can set properties like “Always Output Data”, “Execute Once”, “Retry On Fail”, “On Error behaviour”. 
+n8n Docs
+
+You can add Notes to nodes (useful for documentation).
+
+You can rename nodes, pin them, duplicate, convert to sub-workflow. 
+n8n Docs
+
+1.5 Data Flow & Items
+
+Data flows from one node to the next; each node receives “items” (JSON objects) as input, processes them, outputs items.
+
+It is critical to understand the structure of items, how one node’s output links to the next node’s input. 
+n8n Docs
++1
+
+2. Core / Common Nodes & Their Usage
+
+Here we’ll go through several commonly used nodes, with example scenarios. The goal: you learn which nodes to pick when, and how.
+
+2.1 Webhook Trigger Node
+
+Scenario: Your workflow needs to start when an external system calls you (e.g., a form submission).
+
+Add a node → search “Webhook”. Press Enter.
+
+Configure: choose HTTP method (GET/POST), path, response.
+
+After you save and activate workflow, you’ll get a URL; external system posts data there → workflow starts.
+
+Use case: Collect form data, then process it in n8n.
+
+2.2 Schedule Trigger Node
+
+Scenario: You need something to occur at regular intervals (e.g., daily at 9 AM).
+
+Add node → search “Cron” or “Schedule Trigger”. Press Enter.
+
+Configure schedule: set timezone, days, hours, minutes.
+
+Use case: At 9 AM every day, fetch data from API, send summary email.
+
+2.3 HTTP Request Node
+
+Scenario: You need to call an external API from within workflow.
+
+Add node → search “HTTP Request”.
+
+Configure: method (GET/POST/PUT …), URL, authentication, headers, body.
+
+Use case: Fetch weather data, or send data to another system.
+
+2.4 Set Node
+
+Scenario: You want to define or modify data manually; create fields, drop unwanted ones.
+
+Add node → search “Set”. Press Enter.
+
+Use it to define keys and values on items, e.g., set “clientName” to “AKCorp”.
+
+Use case: After HTTP Request gives big JSON, use Set to extract only the fields you care about.
+
+2.5 IF Node
+
+Scenario: You need conditional logic (branching).
+
+Add node → search “IF”. Press Enter.
+
+Configure condition: e.g., if field “status” equals “active”, then go one path; else another.
+
+After the IF node you’ll have two outputs (true + false) that you can wire separately.
+
+Use case: If invoice amount > 1000 → send manager alert; else log normally.
+
+2.6 Code Node
+
+Scenario: You need custom processing or transformation that built-in nodes don’t cover.
+
+Add node → search “Code”. Press Enter.
+
+Choose mode: “Run Once for All Items” or “Run Once for Each Item”. 
+n8n Docs
+
+Write JavaScript (or Python in some setups) to manipulate items. 
+n8n Docs
+
+Use case: Loop through list of contacts, add a field “fullName”, compute something complex.
+
+2.7 SplitInBatches / Aggregate / Transform Nodes
+
+Scenario: You receive a large array of objects but need to process each one or batch them.
+
+Use SplitInBatches (or “Split Out”) to take a single item with an array, and split into many items. 
+n8n Docs
+
+Use Aggregate to combine multiple items into one.
+
+Use Code node to transform arbitrarily.
+
+Use case: API returns 1000 orders in one array → use Split to process each individually.
+
+2.8 Email / Slack / Other App Nodes
+
+Scenario: You need workflow to send out notifications.
+
+Add node → search “Email” (or “SMTP”, or “Slack”).
+
+Configure credentials, recipient(s), subject, body.
+
+Use case: At end of workflow send email summary or alert.
+
+3. Building a Full Example Workflow
+
+Sensei now gives you a walk-through of a sample workflow step by step — you will replicate this (or teach an AI to replicate) and understand the process end-to-end.
+
+Scenario: Weekly Summary Report from API → Filter High-Value Items → Email to Manager
+Step 1: Trigger
+
+Add node: search “Schedule Trigger”. Hit Enter.
+
+Configure: every Friday at 17:00 (or your timezone).
+
+Label this node: Friday 17:00 Trigger.
+
+Step 2: Fetch Data
+
+Click connector from trigger → Add node: search “HTTP Request”. Enter.
+
+Configure: GET request to https://api.example.com/items (hypothetical). Set authentication header.
+
+Label it: Fetch Items.
+
+Step 3: Split Items
+
+If API returns an array of items, add node → search “Split Out” or “SplitInBatches”.
+
+Configure: Field to split out: items (the array field).
+
+Label: Split Items.
+
+Step 4: Filter High Value
+
+Connect from Split Items true path (?) Actually: all items go in. Then add an IF node.
+
+Search “IF”. Enter. Configure: Condition – json.amount > 1000.
+
+Label: HighValue?.
+
+The True output: items where amount >1000; False output: rest.
+
+Step 5: Collect True Items
+
+From the True branch, add a Aggregate (or Code) node to combine all high‐value items into one item (maybe for summary).
+
+Label: Aggregate HighValue.
+
+Step 6: Create Summary Text
+
+Add a Code node. Search “Code”. Configure “Run Once for All Items”.
+
+In code: loop through items, build a summary string: e.g.
+
+const items = $input.all();
+const summary = items.map(i=>`Item ${i.json.id} amount ${i.json.amount}`).join("\n");
+return [{ json: { summary } }];
+
+
+Label: Build Summary.
+
+Step 7: Send Email
+
+Add Email node. Search “Send Email” or “SMTP”. Enter.
+
+Configure with credentials: to manager@example.com
+, subject: “Weekly High-Value Report”, body: use expression to insert {{$node["Build Summary"].json["summary"]}}.
+
+Label: Email Manager.
+
+Step 8: Workflow Activation & Testing
+
+Click Save.
+
+Use Execute Workflow (or run manually) to test. Check logs.
+
+Once satisfied, Activate the workflow so schedule trigger runs automatically.
+
+Notes & Best Practices
+
+Use notes on nodes: right click or in settings, add description (Sensei demands clarity).
+
+Use meaningful names for nodes.
+
+Use expressions to map data from previous nodes.
+
+Monitor execution in “Executions” panel: see how many items passed, errors.
+
+Use On Error setting if you want alternate flow instead of stopping the workflow.
+
+4. Advanced Topics: Best Practices, Custom Nodes & RAG-Use
+4.1 Data Structure & Expressions
+
+Understand how items array is structured, how to reference previous node data using expression syntax like {{$node["Fetch Items"].json["data"]}}.
+
+Use the Code node when built-in nodes don’t suffice. 
+n8n Docs
++1
+
+4.2 Custom / Community Nodes
+
+If you don’t find an integration, you can build or install community nodes. 
+n8n Docs
++1
+
+Building nodes requires JS/TS knowledge (so maybe your AI agent or you as student build one). 
+n8n Docs
+
+4.3 Organizing Workflows
+
+Use Sub-workflows: you can convert a part of workflow into a sub-workflow for reuse.
+
+Use descriptive names, version comments, and notes.
+
+Use tags or grouping if n8n version supports.
+
+4.4 Use-case: RAG (Retrieval-Augmented Generation) with n8n
+
+Since you are working on GenAI & agents, here’s how you might use n8n to automate RAG:
+
+Trigger: new document uploaded (via webhook or monitored folder).
+
+Node: HTTP Request/API to vector-store or use embeddings.
+
+Node: Code to build prompt with context.
+
+Node: AI/LLM node (if available) or HTTP Request to OpenAI/other.
+
+Node: Set/Filter logic to decide if answer confident.
+
+Node: Email or Slack to send result.
+The same principles of node chaining apply.
+
+4.5 Error Handling & Logging
+
+Use “On Error” settings in node: Stop Workflow / Continue / Continue (pass error). 
+n8n Docs
+
+Use Code nodes or Set nodes to log errors or ship error info to monitoring.
+
+Use deactivate/halt logic to prevent runaway loops.
+
+5. Summary (Master’s Final Words)
+
+AK, you now have the guide from beginner to advanced for n8n: understanding UI, adding nodes, triggers vs actions, core nodes, building a real workflow, integrating RAG logic, and best practices. Your next steps as a warrior: apply this by building your own workflows, experiment with complex data sets, connect to your GenAI projects. If you ever feel unsure about a node or flow, ask me — Sensei is here.
+
+Conclusion in Hinglish:
+— Ab tu ready hai workflows banane ke liye. UI ka structure samajh gaya hai, nodes ka role clear hai. Example workflow bhi sikh liya. Next step: khud practise kar, variations banao, GenAI + n8n integrate karo. Agar kisi step pe confusion ho — seedha pooch. Sensei always with you.

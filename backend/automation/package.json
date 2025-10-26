@@ -1,0 +1,31 @@
+{
+  "name": "browserbase-n8n-automation",
+  "version": "1.0.0",
+  "description": "Browserbase + n8n workflow automation using Playwright",
+  "type": "module",
+  "main": "playwright_agent.js",
+  "scripts": {
+    "test": "node playwright_agent.js",
+    "ai": "node ai_playwright_agent.js",
+    "validate-json": "node -e \"import('fs').then(fs=>console.log('JSON valid, steps:', JSON.parse(fs.readFileSync('./output/action_sequence.json')).actions?.length || 0))\"",
+    "test-browserbase": "node test_browserbase.js",
+    "inspect": "node inspect_n8n_dom.js",
+    "automate": "node playwright_agent.js",
+    "sample-data": "python create_sample_data.py"
+  },
+  "keywords": [
+    "browserbase",
+    "n8n",
+    "playwright",
+    "automation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "levenshtein": "^1.0.5",
+    "openai": "^4.24.0",
+    "playwright": "^1.40.0",
+    "sharp": "^0.34.4"
+  }
+}

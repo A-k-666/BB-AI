@@ -1,0 +1,26 @@
+# Core dependencies for Browserbase + n8n automation backend
+opencv-python>=4.5.0
+pillow>=9.0.0
+requests>=2.25.0
+python-dotenv>=0.19.0
+openai>=1.0.0
+numpy>=1.21.0
+youtube-dl>=2021.12.17
+yt-dlp>=2023.12.30
+selenium>=4.0.0
+beautifulsoup4>=4.9.0
+lxml>=4.6.0
+
+# OCR and Text Processing
+pytesseract>=0.3.10
+
+# Video Processing and ML (compatible versions)
+ffmpeg-python>=0.2.0
+scikit-image>=0.19.0,<0.22.0
+torch>=1.12.0,<2.0.0
+torchvision>=0.13.0,<0.16.0
+ultralytics>=8.0.0
+
+# Enhanced Computer Vision
+imutils>=0.5.4
+scipy>=1.9.0,<1.12.0
