@@ -34,7 +34,7 @@ backend/output/screenshots/
 backend/automation/output/
 backend/analyzerYT/output/
 backend/automationYT/output/
-backend/automation/connection_test/screenshots/
+backend/automation/connection_test/
 
 # Root level temp files
 dump.txt
