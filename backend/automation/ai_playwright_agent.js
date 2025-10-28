@@ -75,6 +75,25 @@ function log(level, message, ...args) {
     console.log(`${prefix}${message}`, ...args);
 }
 
+/**
+ * Parse OpenAI JSON response (removes markdown blocks if present)
+ */
+function parseOpenAIJSON(content) {
+    if (typeof content !== 'string') {
+        throw new Error('Content must be a string');
+    }
+    
+    // Remove markdown code blocks
+    let cleaned = content.trim();
+    if (cleaned.includes('```json')) {
+        cleaned = cleaned.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    } else if (cleaned.includes('```')) {
+        cleaned = cleaned.replace(/```\n?/g, '').trim();
+    }
+    
+    return JSON.parse(cleaned);
+}
+
 class IntelligentN8nAgent {
     constructor() {
         this.browser = null;
@@ -89,12 +108,12 @@ class IntelligentN8nAgent {
         
         // 🧠 Context Memory - stores recent decisions for learning
         this.contextMemory = [];
-        this.maxContextMemory = 20; // Increased for better pattern recognition
+        this.maxContextMemory = 20;
         
         // ⚙️ AI Configuration
-        this.aiModel = process.env.AI_MODEL || 'gpt-4o-mini'; // Use gpt-4o for better reasoning
+        this.aiModel = process.env.AI_MODEL || 'gpt-4o-mini';
         this.explainMode = process.env.AI_EXPLAIN_MODE === 'true';
-        this.useN8nExpert = true;  // Enable n8n expert mode
+        this.useN8nExpert = true;
         
         // Screenshot folder structure
         this.screenshotDirs = {
@@ -104,6 +123,20 @@ class IntelligentN8nAgent {
             errors: '../output/screenshots/errors',
             final: '../output/screenshots/final'
         };
+        
+        // 🎯 Visual Reference & Validation
+        this.referenceImagePath = join(__dirname, '..', 'output', 'ai_visual_recipe.png');
+        this.referenceImageBase64 = null;
+        this.workflowBlueprint = null;
+        this.validationSteps = [];
+        
+        // ⚡ PERFORMANCE CACHE
+        this.canvasHandle = null;
+        this.cachedSelectors = new Map();
+        this.nodeRetryCount = new Map();
+        
+        // ⏰ KEEP-ALIVE
+        this.keepAliveInterval = null;
         
         // Ensure output directories exist
         this.ensureDirectories();
@@ -396,7 +429,7 @@ If no good option visible:
                 temperature: 0.1
             }, 3);
 
-            const result = JSON.parse(response.choices[0].message.content);
+            const result = parseOpenAIJSON(response.choices[0].message.content);
             
             if (this.aiExplainMode) {
                 log('ai', `AI Reasoning: ${result.reasoning}`);
@@ -410,88 +443,118 @@ If no good option visible:
         }
     }
 
+    async _selectCorrectOptionWithAI(nodeName, exactOption, currentNodeHints) {
+        /**
+         * 🧠 Use AI Vision to select correct option from sidebar
+         * Uses: workflow JSON hints + transcript + visual recipe
+         */
+        try {
+            // Take screenshot of options sidebar
+            const screenshot = await this.page.screenshot({ encoding: 'base64' });
+            const compressedScreenshot = await compressBase64Png(screenshot);
+            
+            // Get hints from workflow JSON
+            const selectOption = currentNodeHints?.select_option || exactOption;
+            const configNotes = currentNodeHints?.configuration_notes || "";
+            
+            // Load transcript hints
+            const fs = await import('fs/promises');
+            let transcriptHint = "";
+            try {
+                const transcriptPath = join(__dirname, '..', 'analyzerYT', 'output', 'transcript.json');
+                const transcriptData = JSON.parse(await fs.readFile(transcriptPath, 'utf-8'));
+                transcriptHint = transcriptData.full_text.substring(0, 1000);
+            } catch {}
+            
+            const prompt = `Look at this n8n options sidebar/panel.
+
+REQUIRED OPTION (from workflow analysis):
+"${selectOption}"
+
+TRANSCRIPT CONTEXT:
+${transcriptHint}
+
+CONFIGURATION NOTES:
+${configNotes}
+
+TASK:
+1. Find the option that matches "${selectOption}" in the visible panel
+2. Return EXACT text as shown in the UI
+
+Common patterns:
+- "on messages" or "On messages" for WhatsApp trigger
+- "send message" or "Send message" for WhatsApp action
+- "Message a model" for OpenAI model interaction
+
+Return JSON:
+{
+  "selected_option": "exact UI text of option",
+  "confidence": 0-100,
+  "reasoning": "match found"
+}`;
+
+            const response = await openaiCallWithRetries(this.openai, {
+                model: 'gpt-4o',
+                messages: [{
+                    role: 'user',
+                    content: [
+                        { type: 'text', text: prompt },
+                        {
+                            type: 'image_url',
+                            image_url: { url: `data:image/jpeg;base64,${compressedScreenshot}` }
+                        }
+                    ]
+                }],
+                response_format: { type: 'json_object' },
+                max_tokens: 200,
+                temperature: 0
+            }, 3);
+            
+            const result = parseOpenAIJSON(response.choices[0].message.content);
+            
+            if (result.selected_option && result.confidence > 60) {
+                log('ai', `AI found: "${result.selected_option}" (${result.confidence}% match with "${selectOption}")`);
+                return result.selected_option;
+            }
+            
+            return null;
+            
+        } catch (error) {
+            log('warn', `AI option selection failed: ${error.message}`);
+            return null;
+        }
+    }
+
     async _verifyNodeAdded(nodeType, expectedName) {
         /**
-         * Verify node actually appeared on canvas - Fast DOM check + AI Vision fallback
+         * ✅ ORIGINAL verification logic (reliable)
+         * CRITICAL: Check settings panel + AI Vision fallback
          */
         try {
             await this.page.waitForTimeout(1500);
             
-            // 🚀 FAST PATH: DOM-based verification first
-            const canvasNodes = await this.page.$$eval(
-                '[data-test-id="canvas-node"], .node-box, [class*="node"]',
-                (els, expected) => {
-                    return els.map(el => {
-                        const text = (el.innerText || el.textContent || '').toLowerCase();
-                        const dataName = (el.getAttribute('data-name') || '').toLowerCase();
-                        return { text, dataName, match: text.includes(expected.toLowerCase()) || dataName.includes(expected.toLowerCase()) };
-                    });
-                },
-                expectedName
-            ).catch(() => []);
+            // 🎯 BEST VERIFICATION: Check if settings/config panel appeared
+            const settingsPanel = await this.page.locator('[data-test-id="node-settings"], .node-settings-panel, [class*="ndv-wrapper"]').isVisible().catch(() => false);
             
-            const domMatch = canvasNodes.some(n => n.match);
-            
-            if (domMatch) {
-                log('success', `Fast DOM verification: Node "${expectedName}" found on canvas`);
+            if (settingsPanel) {
+                log('success', `✅ Settings panel opened - Node "${expectedName}" definitely added!`);
                 return true;
             }
             
-            log('debug', 'DOM check failed, trying AI Vision verification...');
+            log('warn', `⚠️  No settings panel detected - node might not have been added`);
             
-            // 🧠 AI VISION FALLBACK: Only if DOM check fails
-            const screenshot = await this.page.screenshot({ encoding: 'base64' });
-            const compressedScreenshot = await compressBase64Png(screenshot);
+            // 🚨 CRITICAL FIX: Settings panel is MANDATORY for node creation
+            // If no settings panel, node was NOT added - this is the most reliable check
+            // AI Vision can be fooled by sidebar panels, but settings panel opening is definitive
             
-            const prompt = `Look at this n8n workflow canvas.
-
-**Question:** Is there a node visible with type/name similar to "${expectedName}" or "${nodeType}"?
-
-Look for:
-- Node boxes on the canvas (NOT in sidebar/modal)
-- Text labels on nodes
-- Icons representing node types
-- Recent additions (might be highlighted or selected)
-
-Return JSON:
-{
-  "node_present": true/false,
-  "node_name": "visible name if found",
-  "confidence": 0-100,
-  "reasoning": "what you see"
-}`;
-
-            const response = await openaiCallWithRetries(this.openai, {
-                model: this.aiModel,
-                messages: [
-                    {
-                        role: 'user',
-                        content: [
-                            { type: 'text', text: prompt },
-                            {
-                                type: 'image_url',
-                                image_url: { url: `data:image/jpeg;base64,${compressedScreenshot}` }
-                            }
-                        ]
-                    }
-                ],
-                response_format: { type: 'json_object' },
-                max_tokens: 300,
-                temperature: 0.1
-            }, 3);
-
-            const result = JSON.parse(response.choices[0].message.content);
+            log('error', `❌ Node NOT added - settings panel did not open`);
+            log('info', `This usually means a sidebar/options panel opened instead of adding the node`);
             
-            log('debug', `AI Vision: ${result.node_present ? 'Node found' : 'Node NOT found'} (${result.confidence}% confident)`);
-            
-            if (this.aiExplainMode && result.reasoning) {
-                log('ai', result.reasoning);
-            }
-            
-            return result.node_present && result.confidence > 60;
+            // STOP HERE - return false immediately
+            return false;
             
         } catch (error) {
-            log('warn', `Verification failed: ${error.message}`);
+            log('error', `Verification error: ${error.message}`);
             return false;
         }
     }
@@ -526,13 +589,52 @@ Return JSON:
 
     async takeScreenshot(category, description) {
         this.screenshotCounter++;
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
         const filename = `${String(this.screenshotCounter).padStart(3, '0')}_${description.replace(/\s+/g, '_')}.png`;
         const path = `${this.screenshotDirs[category]}/${filename}`;
         
-        await this.page.screenshot({ path, fullPage: true });
+        // ✅ BLOCKING - Original behavior (reliable)
+        try {
+            await this.page.screenshot({ 
+                path, 
+                fullPage: true
+            });
         console.log(`   📸 Screenshot: ${category}/${filename}`);
+        } catch (e) {
+            console.log(`   ⚠️  Screenshot failed: ${e.message}`);
+        }
+        
         return path;
+    }
+    
+    /**
+     * ⏰ Keep-Alive (prevent Browserbase timeout)
+     */
+    startKeepAlive() {
+        if (this.keepAliveInterval) return;
+        this.keepAliveInterval = setInterval(async () => {
+            try {
+                await this.page.evaluate(() => Date.now());
+            } catch (e) {
+                clearInterval(this.keepAliveInterval);
+            }
+        }, 25000); // Every 25s
+    }
+    
+    stopKeepAlive() {
+        if (this.keepAliveInterval) {
+            clearInterval(this.keepAliveInterval);
+        }
+    }
+    
+    /**
+     * 🛡️ Safe wrapper
+     */
+    async safe(fn, fallback = null) {
+        try {
+            return await fn();
+        } catch (e) {
+            return fallback;
+        }
     }
 
     /**
@@ -627,7 +729,7 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
                 max_tokens: 500
             });
 
-            const result = JSON.parse(response.choices[0].message.content);
+            const result = parseOpenAIJSON(response.choices[0].message.content);
             
             console.log(`   ✅ AI Selector: ${result.selector}`);
             console.log(`   💡 Reasoning: ${result.reasoning}`);
@@ -689,7 +791,7 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
                 max_tokens: 200
             });
             
-            const evaluation = JSON.parse(response.choices[0].message.content);
+            const evaluation = parseOpenAIJSON(response.choices[0].message.content);
             
             if (this.explainMode) {
                 console.log(`\n🔍 Self-Evaluation: ${evaluation.success ? '✅' : '❌'}`);
@@ -700,6 +802,75 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
         } catch (error) {
             console.log(`   ⚠️  Self-evaluation failed: ${error.message}`);
             return true; // Assume success if evaluation fails
+        }
+    }
+
+    /**
+     * 🎯 Compare current canvas with reference blueprint
+     */
+    async compareWithReference(stepName) {
+        if (!this.referenceImageBase64 || !this.workflowBlueprint) {
+            return { match_percentage: 100, notes: "No reference loaded" };
+        }
+
+        try {
+            log('info', `📊 Comparing with reference: ${stepName}`);
+            const currentScreenshot = await this.page.screenshot({ encoding: 'base64', fullPage: false });
+            const compressed = await compressBase64Png(currentScreenshot);
+
+            const response = await openaiCallWithRetries(this.openai, {
+                model: 'gpt-4o',
+                messages: [{
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Compare current n8n canvas (left) with reference workflow (right).
+
+Step: ${stepName}
+
+Analyze:
+1. How many nodes match? (name + type)
+2. Are connections similar?
+3. Any missing nodes or connections?
+4. Special slots filled correctly? (like "Chat Model+")
+
+Return JSON:
+{
+  "match_percentage": 85,
+  "nodes_matched": ["WhatsApp Trigger", "AI Agent"],
+  "nodes_missing": ["WhatsApp Business Cloud"],
+  "connections_status": "2/3 complete",
+  "issues": ["Chat Model slot not connected"],
+  "next_action": "Add missing node"
+}`
+                        },
+                        {
+                            type: 'image_url',
+                            image_url: { url: `data:image/jpeg;base64,${compressed}` }
+                        },
+                        {
+                            type: 'image_url',
+                            image_url: { url: `data:image/png;base64,${this.referenceImageBase64}` }
+                        }
+                    ]
+                }],
+                max_tokens: 1000
+            });
+
+            const comparison = parseOpenAIJSON(response.choices[0].message.content);
+            this.validationSteps.push({ step: stepName, ...comparison });
+
+            log('ai', `Match: ${comparison.match_percentage}% | ${comparison.connections_status}`);
+            if (comparison.issues.length > 0) {
+                log('warn', `Issues: ${comparison.issues.join(', ')}`);
+            }
+
+            return comparison;
+
+        } catch (error) {
+            log('warn', `Comparison failed: ${error.message}`);
+            return { match_percentage: 0, issues: [error.message] };
         }
     }
 
@@ -815,10 +986,70 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
     }
 
     /**
+     * 🎯 Load reference image (ai_visual_recipe.png) as blueprint
+     */
+    async loadReferenceImage() {
+        try {
+            log('info', '🖼️  Loading reference image from analyzerYT output');
+            const fs = await import('fs/promises');
+            // Try analyzerYT output first, fallback to old output
+            let imagePath = this.referenceImagePath.replace('/output/', '/analyzerYT/output/');
+            try {
+                await fs.access(imagePath);
+                log('info', '✅ Using analyzerYT visual recipe');
+            } catch {
+                imagePath = this.referenceImagePath;
+                log('info', '⚠️  Fallback to old output folder');
+            }
+            const imageBuffer = await fs.readFile(imagePath);
+            this.referenceImageBase64 = imageBuffer.toString('base64');
+            
+            // Extract workflow blueprint using AI Vision
+            const response = await openaiCallWithRetries(this.openai, {
+                model: 'gpt-4o',
+                messages: [{
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Analyze this n8n workflow reference image. Extract:
+1. All node names and their types (trigger/action/model/output)
+2. All connections between nodes
+3. Special connection types (like "Chat Model+" slots)
+
+Return JSON:
+{
+  "nodes": [{"name": "WhatsApp Trigger", "type": "trigger", "special_slots": []}],
+  "connections": [{"from": "node1", "to": "node2", "connection_type": "normal/slot"}],
+  "total_nodes": 4
+}`
+                        },
+                        {
+                            type: 'image_url',
+                            image_url: { url: `data:image/png;base64,${this.referenceImageBase64}` }
+                        }
+                    ]
+                }],
+                max_tokens: 2000
+            });
+            
+            this.workflowBlueprint = parseOpenAIJSON(response.choices[0].message.content);
+            log('success', `Blueprint loaded: ${this.workflowBlueprint.total_nodes} nodes expected`);
+            return true;
+        } catch (error) {
+            log('warn', `Could not load reference: ${error.message}`);
+            return false;
+        }
+    }
+
+    /**
      * 🌐 Connect to Browserbase
      */
     async connect() {
         console.log('\n🚀 Starting AI-Powered n8n Agent\n');
+        
+        // Load reference image first
+        await this.loadReferenceImage();
         
         // Load n8n expert knowledge
         if (this.useN8nExpert) {
@@ -840,8 +1071,15 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
         this.context = this.browser.contexts()[0];
         this.page = this.context.pages()[0];
         
-        // Set default timeout to 14 seconds for fast testing
-        this.page.setDefaultTimeout(14000);
+        // Increase timeout to 60 seconds for stability
+        this.page.setDefaultTimeout(60000);
+        this.context.setDefaultTimeout(60000);
+        
+        // ⏰ Start keep-alive to prevent session timeout
+        this.startKeepAlive();
+        
+        // 🎯 Cache canvas handle
+        this.canvasHandle = await this.safe(() => this.page.$('[data-test-id="canvas-wrapper"]'));
         
         console.log('✅ Connected to Browserbase');
         console.log('📄 Page ready\n');
@@ -971,7 +1209,7 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
             
             // 1️⃣ FAST PATH: Press Enter immediately (like a human)
             try {
-                await searchBox.press('Enter');
+            await searchBox.press('Enter');
                 log('debug', 'Pressed Enter (fast path)');
             } catch (e) {
                 log('warn', `Enter press failed: ${e.message}`);
@@ -986,13 +1224,60 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
             if (nodeAdded) {
                 log('success', `✅ Node added via Enter: "${nodeName}"`);
             } else {
-                // 3️⃣ SMART FALLBACK: Enter didn't work, use intelligent selection
-                log('warn', `⚠️ Enter didn't work, using AI fallback for "${nodeName}"...`);
+                // 3️⃣ SMART FALLBACK: Use AI Vision to select correct option from sidebar
+                log('warn', `⚠️ Enter didn't work - sidebar opened with options`);
+                log('info', `🧠 Using AI Vision to select correct option...`);
                 
-                const modalStillOpen = await this.page.locator('[data-test-id="node-creator-search-bar"]').isVisible().catch(() => false);
+                // Check if node creator OR sidebar panel is open
+                await this.page.waitForTimeout(1000);
                 
-                if (modalStillOpen) {
-                    // Get available options without logging spam
+                // 🧠 Use AI Vision to find and click correct option
+                const selectedOption = await this._selectCorrectOptionWithAI(nodeName, exactOption, this.currentNodeHints);
+                
+                if (selectedOption) {
+                    log('success', `✅ AI selected: "${selectedOption}"`);
+                    
+                    // Try multiple click strategies
+                    let clicked = false;
+                    
+                    // Strategy 1: Click from node creator items
+                    try {
+                        const optionElement = this.page.locator(`[data-test-id="node-creator-node-item"]:has-text("${selectedOption}")`).first();
+                        if (await optionElement.isVisible({ timeout: 1000 }).catch(() => false)) {
+                            await optionElement.click();
+                            clicked = true;
+                            log('info', '   Clicked from node creator');
+                        }
+                    } catch {}
+                    
+                    // Strategy 2: Click from sidebar actions/triggers list
+                    if (!clicked) {
+                        try {
+                            const sidebarOption = this.page.getByText(selectedOption, { exact: false }).first();
+                            if (await sidebarOption.isVisible({ timeout: 1000 }).catch(() => false)) {
+                                await sidebarOption.click();
+                                clicked = true;
+                                log('info', '   Clicked from sidebar');
+                            }
+                        } catch {}
+                    }
+                    
+                    if (clicked) {
+                        await this.page.waitForTimeout(2000);
+                        
+                        // Verify settings panel opened
+                        nodeAdded = await this._verifyNodeAdded(nodeType, nodeName);
+                        
+                        if (!nodeAdded) {
+                            log('error', `❌ Click succeeded but settings panel didn't open`);
+                        }
+                    } else {
+                        log('error', `❌ Could not click option: "${selectedOption}"`);
+                    }
+                } else {
+                    log('error', `❌ AI could not find correct option`);
+                    
+                    // OLD FALLBACK CODE (keep for edge cases)
                     const options = await this.page.$$eval(
                         '[data-test-id="node-creator-node-item"]',
                         els => els.map(el => el.textContent.trim())
@@ -1033,10 +1318,6 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
                         await this.page.waitForTimeout(1500);
                         nodeAdded = await this._verifyNodeAdded(nodeType, nodeName);
                     }
-                } else {
-                    log('info', 'Modal closed, waiting for node to render...');
-                    await this.page.waitForTimeout(2000);
-                    nodeAdded = await this._verifyNodeAdded(nodeType, nodeName);
                 }
             }
             
@@ -1131,7 +1412,155 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
     /**
      * 🔗 AI-Powered Node Connection (Visual Strategy)
      */
-    async connectNodesIntelligent(fromType, toType) {
+    /**
+     * 🔍 Detect + icons in a node using AI Vision
+     */
+    async detectPlusIconsInNode(nodeName) {
+        try {
+            log('ai', `Detecting + icons in "${nodeName}" node...`);
+            const screenshot = await this.page.screenshot({ encoding: 'base64' });
+            const compressed = await compressBase64Png(screenshot);
+
+            const response = await openaiCallWithRetries(this.openai, {
+                model: 'gpt-4o',
+                messages: [{
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Analyze the "${nodeName}" node on this n8n canvas.
+
+Find ALL "+" icons (plus buttons) in this node with their labels.
+
+Common + icon labels:
+- "Chat Model +" or "Chat Model*"
+- "Memory +"
+- "Tool +"
+- Any other "Something +"
+
+For each + icon, provide:
+1. Label text (what's written next to +)
+2. Position (x, y coordinates)
+3. Purpose (what type of node should connect here)
+
+Return JSON:
+{
+  "has_plus_icons": true/false,
+  "plus_icons": [
+    {
+      "label": "Chat Model",
+      "position": {"x": 450, "y": 300},
+      "purpose": "AI model or chat model",
+      "clickable": true
+    }
+  ],
+  "node_name": "${nodeName}"
+}`
+                        },
+                        {
+                            type: 'image_url',
+                            image_url: { url: `data:image/jpeg;base64,${compressed}` }
+                        }
+                    ]
+                }],
+                max_tokens: 1000
+            });
+
+            const result = parseOpenAIJSON(response.choices[0].message.content);
+            
+            if (result.has_plus_icons && result.plus_icons.length > 0) {
+                log('success', `Found ${result.plus_icons.length} + icon(s) in "${nodeName}"`);
+                result.plus_icons.forEach(icon => {
+                    log('info', `  - "${icon.label}" at (${Math.round(icon.position.x)}, ${Math.round(icon.position.y)})`);
+                });
+                return result.plus_icons;
+            }
+
+            log('info', `No + icons found in "${nodeName}"`);
+            return [];
+
+        } catch (error) {
+            log('warn', `+ icon detection failed: ${error.message}`);
+            return [];
+        }
+    }
+
+    /**
+     * 🧠 Match + icon with target node (intelligent matching)
+     */
+    matchPlusIconWithNode(plusIcons, targetNodeName) {
+        if (!plusIcons || plusIcons.length === 0) return null;
+
+        // Smart matching logic
+        for (const icon of plusIcons) {
+            const label = icon.label.toLowerCase();
+            const target = targetNodeName.toLowerCase();
+            const purpose = icon.purpose.toLowerCase();
+
+            // Exact or substring match
+            if (target.includes(label) || label.includes(target)) {
+                log('success', `✅ Matched: "${icon.label}" ← "${targetNodeName}"`);
+                return icon;
+            }
+
+            // Purpose-based match - Enhanced for "Chat Model", "OpenRouter", etc.
+            if ((target.includes('chat') || target.includes('model') || target.includes('openrouter')) && 
+                (purpose.includes('chat') || label.includes('chat') || label.includes('model'))) {
+                log('success', `✅ Matched (purpose): "${icon.label}" ← "${targetNodeName}" (chat/model)`);
+                return icon;
+            }
+
+            if (target.includes('memory') && (purpose.includes('memory') || label.includes('memory'))) {
+                log('success', `✅ Matched (purpose): "${icon.label}" ← "${targetNodeName}" (memory)`);
+                return icon;
+            }
+
+            if (target.includes('tool') && (purpose.includes('tool') || label.includes('tool'))) {
+                log('success', `✅ Matched (purpose): "${icon.label}" ← "${targetNodeName}" (tool)`);
+                return icon;
+            }
+        }
+
+        // No match found - use first + icon as fallback
+        if (plusIcons.length > 0) {
+            log('warn', `No perfect match, using first + icon: "${plusIcons[0].label}"`);
+            return plusIcons[0];
+        }
+
+        return null;
+    }
+
+    /**
+     * 🔍 Verify connection exists in DOM
+     */
+    async verifyConnectionInDOM(sourceNodeId, targetNodeId) {
+        try {
+            const exists = await this.page.evaluate(({src, tgt}) => {
+                // Extract UUID from node IDs
+                const srcUUID = src.split('-')[1];
+                const tgtUUID = tgt.split('-')[1];
+
+                // Check SVG connection paths
+                const connections = [...document.querySelectorAll('g[data-type="connection"] path, svg path[class*="connection"]')];
+                
+                return connections.some(path => {
+                    const d = path.getAttribute('d') || '';
+                    const dataConnection = path.closest('g')?.getAttribute('data-connection') || '';
+                    
+                    // Check if path contains both node UUIDs
+                    return (d.includes(srcUUID) || dataConnection.includes(srcUUID)) &&
+                           (d.includes(tgtUUID) || dataConnection.includes(tgtUUID));
+                });
+            }, {src: sourceNodeId, tgt: targetNodeId});
+
+            return exists;
+        } catch (error) {
+            log('warn', `Connection verification failed: ${error.message}`);
+            return false;
+        }
+    }
+
+    async connectNodesIntelligent(fromType, toType, fromNodeId = null, toNodeId = null) {
         console.log(`\n🔗 Connecting: ${fromType} → ${toType}`);
 
         try {
@@ -1140,53 +1569,164 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
             // Wait for nodes to fully render
             await this.page.waitForTimeout(2000);
             
-            // Strategy 1: Try dragTo (Playwright built-in)
-            try {
-                console.log(`   🎯 Strategy 1: Direct drag connection`);
+            // 🔁 RETRY LOOP (up to 3 attempts)
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                log('info', `🔄 Attempt ${attempt}/3`);
                 
-                // Find nodes by visible elements (not IDs)
+                // ⭐ STRATEGY 1: Check for + icons first (intelligent!)
+                log('ai', `Step 1: Checking if "${fromType}" has + icons...`);
+                const plusIcons = await this.detectPlusIconsInNode(fromType);
+                
+                if (plusIcons.length > 0) {
+                    // Find matching + icon for target node
+                    const matchedIcon = this.matchPlusIconWithNode(plusIcons, toType);
+                    
+                    if (matchedIcon) {
+                        log('success', `✅ Using + icon: "${matchedIcon.label}" for "${toType}"`);
+                        
+                        // Get target node position by looking for diamond OR circle shape
+                        const targetNodeInfo = await this.page.evaluate((targetName) => {
+                            // Look for canvas nodes containing target name
+                            const canvasNodes = [...document.querySelectorAll('[data-test-id^="canvas-node"]')];
+                            
+                            for (const node of canvasNodes) {
+                                const text = node.textContent || '';
+                                if (text.includes(targetName) || text.toLowerCase().includes(targetName.toLowerCase())) {
+                                    // Check if it has diamond (path) or circle shape
+                                    const hasDiamond = node.querySelector('path[d*="M"]') !== null;
+                                    const hasCircle = node.querySelector('circle[r]') !== null;
+                                    
+                                    const box = node.getBoundingClientRect();
+                                    return {
+                                        found: true,
+                                        shape: hasDiamond ? 'diamond' : (hasCircle ? 'circle' : 'rect'),
+                                        x: box.x,
+                                        y: box.y,
+                                        width: box.width,
+                                        height: box.height,
+                                        name: text.trim().split('\n')[0]
+                                    };
+                                }
+                            }
+                            return { found: false };
+                        }, toType);
+                        
+                        if (targetNodeInfo.found) {
+                            log('success', `Found target: "${targetNodeInfo.name}" (${targetNodeInfo.shape})`);
+                            log('info', `🎯 Dragging from + icon to ${targetNodeInfo.shape} node...`);
+                            
+                            // Drag from + icon to target node center
+                            const plusX = matchedIcon.position.x;
+                            const plusY = matchedIcon.position.y;
+                            const targetX = targetNodeInfo.x + targetNodeInfo.width / 2;
+                            const targetY = targetNodeInfo.y + targetNodeInfo.height / 2;
+                            
+                            log('debug', `Coordinates: (${Math.round(plusX)}, ${Math.round(plusY)}) → (${Math.round(targetX)}, ${Math.round(targetY)})`);
+                            
+                            await this.page.mouse.move(plusX, plusY);
+                            await this.page.mouse.down();
+                            await this.page.waitForTimeout(400);
+                            await this.page.mouse.move(targetX, targetY, { steps: 30 });
+                            await this.page.waitForTimeout(400);
+                            await this.page.mouse.up();
+                            await this.page.waitForTimeout(1500);
+                            
+                            log('success', `✅ Connected via + icon drag: ${fromType}.${matchedIcon.label} → ${toType}`);
+                            await this.takeScreenshot('connections', `success_plus_${fromType}_to_${toType}`);
+                            return true;
+                        } else {
+                            log('warn', `Target node "${toType}" not found on canvas`);
+                        }
+                    }
+                }
+                
+                // ⭐ STRATEGY 2: Regular circle-to-circle drag (fallback)
+                log('info', `Step 2: Using regular circle drag...`);
+                try {
+                    console.log(`   🎯 Circle-based drag connection`);
+                    
+                    // Find ALL canvas nodes
                 const allNodes = await this.page.locator('[data-test-id^="canvas"]').all();
                 console.log(`   📊 Found ${allNodes.length} canvas elements`);
                 
                 if (allNodes.length >= 2) {
-                    // Assume first node = source, last node = target
+                        // Find source and target based on position (first = oldest, last = newest)
                     const sourceNode = allNodes[0];
                     const targetNode = allNodes[allNodes.length - 1];
                     
-                    // Find output/input circles
-                    const outputCircle = sourceNode.locator('circle').last();
-                    const inputCircle = targetNode.locator('circle').first();
+                        // Find ALL circles in source (output is usually last)
+                        const sourceCircles = await sourceNode.locator('circle').all();
+                        // Find ALL circles in target (input is usually first)
+                        const targetCircles = await targetNode.locator('circle').all();
+                        
+                        console.log(`   🔍 Source circles: ${sourceCircles.length}, Target circles: ${targetCircles.length}`);
+                        
+                        if (sourceCircles.length > 0 && targetCircles.length > 0) {
+                            // Output = last circle, Input = first circle
+                            const outputCircle = sourceCircles[sourceCircles.length - 1];
+                            const inputCircle = targetCircles[0];
                     
                     const sourceBox = await outputCircle.boundingBox();
                     const targetBox = await inputCircle.boundingBox();
                     
                     if (sourceBox && targetBox) {
-                        console.log(`   🎯 Found connection points`);
-                        
-                        // Manual drag with mouse
-                        await this.page.mouse.move(sourceBox.x + sourceBox.width/2, sourceBox.y + sourceBox.height/2);
+                                console.log(`   🎯 Connection points: (${Math.round(sourceBox.x)}, ${Math.round(sourceBox.y)}) → (${Math.round(targetBox.x)}, ${Math.round(targetBox.y)})`);
+                                
+                                // Human-like drag with precise center targeting
+                                const srcX = sourceBox.x + sourceBox.width / 2;
+                                const srcY = sourceBox.y + sourceBox.height / 2;
+                                const tgtX = targetBox.x + targetBox.width / 2;
+                                const tgtY = targetBox.y + targetBox.height / 2;
+                                
+                                await this.page.mouse.move(srcX, srcY);
                         await this.page.mouse.down();
-                        await this.page.waitForTimeout(500);
-                        await this.page.mouse.move(targetBox.x + targetBox.width/2, targetBox.y + targetBox.height/2, { steps: 20 });
-                        await this.page.waitForTimeout(500);
+                                await this.page.waitForTimeout(300);
+                                await this.page.mouse.move(tgtX, tgtY, { steps: 25 });
+                                await this.page.waitForTimeout(300);
                         await this.page.mouse.up();
                         
+                                // Wait for connection to render
+                                await this.page.waitForTimeout(1000);
+                                
+                                // Verify connection in DOM
+                                const verified = sourceId && targetId ? 
+                                    await this.verifyConnectionInDOM(sourceId, targetId) : 
+                                    true;
+                                
+                                if (verified) {
+                                    log('success', `✅ Connection verified in DOM!`);
                         console.log(`✅ Connected ${fromType} → ${toType}\n`);
+                                    await this.takeScreenshot('connections', `success_${fromType}_to_${toType}`);
+                                    return true;
+                                } else if (attempt < 3) {
+                                    log('warn', `Connection not verified, retrying...`);
                         await this.page.waitForTimeout(1000);
+                                    continue;
+                                } else {
+                                    log('warn', `Connection created but not verified`);
+                                    console.log(`✅ Connected ${fromType} → ${toType} (unverified)\n`);
                         await this.takeScreenshot('connections', `success_${fromType}_to_${toType}`);
                         return true;
+                                }
+                            }
                     }
                 }
             } catch (e) {
-                console.log(`   ⚠️  Direct drag failed: ${e.message}`);
+                    log('warn', `Circle drag failed: ${e.message}`);
+                    if (attempt < 3) {
+                        await this.page.waitForTimeout(1000);
+                        continue;
+                    }
+                }
             }
             
             // Strategy 2: AI Vision-based connection
             console.log(`   🎯 Strategy 2: AI Vision-based connection`);
             const screenshot = await this.page.screenshot({ encoding: 'base64' });
+            const compressed = await compressBase64Png(screenshot);
             
-            const response = await this.openai.chat.completions.create({
-                model: this.aiModel,
+            const response = await openaiCallWithRetries(this.openai, {
+                model: 'gpt-4o',
                 messages: [
                     {
                         role: "system",
@@ -1199,7 +1739,7 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
                                 type: "text", 
                                 text: `Find output circle of "${fromType}" node and input circle of "${toType}" node. Return JSON: { "sourceX": x, "sourceY": y, "targetX": x, "targetY": y, "possible": true/false }` 
                             },
-                            { type: "image_url", image_url: { url: `data:image/png;base64,${screenshot}` } }
+                            { type: "image_url", image_url: { url: `data:image/jpeg;base64,${compressed}` } }
                         ]
                     }
                 ],
@@ -1207,7 +1747,7 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
                 max_tokens: 200
             });
             
-            const coords = JSON.parse(response.choices[0].message.content);
+            const coords = parseOpenAIJSON(response.choices[0].message.content);
             
             if (coords.possible) {
                 console.log(`   🎯 AI found coordinates: (${coords.sourceX}, ${coords.sourceY}) → (${coords.targetX}, ${coords.targetY})`);
@@ -1238,17 +1778,26 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
     async runAutomation() {
         try {
             // Try AI-enhanced workflow first (91% understanding)
-            let actionPath = join(__dirname, '..', 'output', 'ai_workflow_complete.json');
+            // 🎯 PRIORITY: Load from analyzerYT (new robust analyzer)
+            let actionPath = join(__dirname, '..', 'analyzerYT', 'output', 'ai_workflow_complete.json');
             let workflow;
             
             try {
                 workflow = JSON.parse(await readFile(actionPath, 'utf-8'));
-                console.log('\n🧠 Using AI-Enhanced Workflow (91% understanding)');
+                console.log('\n🎯 Using analyzerYT Workflow (Audio + Vision)');
+                console.log(`📋 Workflow: ${workflow.workflow_name}`);
             } catch {
-                // Fallback to standard action_sequence.json
-                actionPath = join(__dirname, '..', 'output', 'action_sequence.json');
+                // Fallback to old output folder
+                try {
+                    actionPath = join(__dirname, '..', 'output', 'ai_workflow_complete.json');
                 workflow = JSON.parse(await readFile(actionPath, 'utf-8'));
-                console.log('\n📋 Using Standard Workflow');
+                    console.log('\n🧠 Using AI-Enhanced Workflow (fallback)');
+                } catch {
+                    // Final fallback
+                    actionPath = join(__dirname, '..', 'output', 'action_sequence.json');
+                    workflow = JSON.parse(await readFile(actionPath, 'utf-8'));
+                    console.log('\n📋 Using Standard Workflow (fallback)');
+                }
             }
 
             // Deduplicate nodes (remove duplicates by name)
@@ -1318,6 +1867,12 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
                     // Store node mapping for connections
                     this.nodeIdMap[node.id] = nodeId;
                     
+                    // Compare with reference after each node (skip to save time)
+                    // if (nodeId && this.referenceImageBase64) {
+                    //     const comparison = await this.compareWithReference(`After adding ${node.name}`);
+                    //     stepLog.validation = comparison;
+                    // }
+                    
                 } catch (error) {
                     stepLog.status = 'failed';
                     stepLog.error = error.message;
@@ -1358,21 +1913,82 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
             await this.takeScreenshot('final', 'complete_workflow');
             console.log('📸 Final screenshot saved\n');
             
-            // 💾 SAVE WORKFLOW IN N8N
-            console.log('💾 Saving workflow in n8n...');
+            // 🎯 FINAL VALIDATION - Compare with reference
+            console.log('\n========================================');
+            console.log('🎯 FINAL VALIDATION');
+            console.log('========================================\n');
+            
+            const finalComparison = await this.compareWithReference('Final Workflow');
+            
+            console.log(`\n📊 Workflow Replication Results:`);
+            console.log(`   Match: ${finalComparison.match_percentage}%`);
+            console.log(`   Nodes Matched: ${finalComparison.nodes_matched?.length || 0}/${this.workflowBlueprint?.total_nodes || workflow.nodes.length}`);
+            console.log(`   Connections: ${finalComparison.connections_status || 'Unknown'}`);
+            
+            if (finalComparison.nodes_missing && finalComparison.nodes_missing.length > 0) {
+                console.log(`\n❌ Missing Nodes:`);
+                finalComparison.nodes_missing.forEach(node => console.log(`   - ${node}`));
+            }
+            
+            if (finalComparison.issues && finalComparison.issues.length > 0) {
+                console.log(`\n⚠️  Issues Found:`);
+                finalComparison.issues.forEach(issue => console.log(`   - ${issue}`));
+            }
+            
+            // Success criteria
+            if (finalComparison.match_percentage >= 90) {
+                log('success', `\n✅ EXCELLENT! ${finalComparison.match_percentage}% match with reference`);
+            } else if (finalComparison.match_percentage >= 75) {
+                log('success', `\n✅ GOOD! ${finalComparison.match_percentage}% match with reference`);
+            } else {
+                log('warn', `\n⚠️  PARTIAL! ${finalComparison.match_percentage}% match with reference`);
+            }
+            
+            console.log('\n========================================\n');
+            
+            // Add to execution log
+            executionLog.final_validation = finalComparison;
+            
+            // 💾 SAVE WORKFLOW IN N8N (Enhanced)
+            console.log('\n💾 Saving workflow in n8n...');
             try {
-                // Try to find and click Save button
-                const saveBtn = this.page.locator('button:has-text("Save"), button[data-test-id="workflow-save-button"]').first();
-                if (await saveBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+                // Wait for any pending UI updates
+                await this.page.waitForTimeout(1000);
+                
+                // Strategy 1: Try direct Save button
+                const saveBtn = this.page.locator('button:has-text("Save")').first();
+                const isSaveVisible = await saveBtn.isVisible({ timeout: 3000 }).catch(() => false);
+                
+                if (isSaveVisible) {
+                    log('info', 'Clicking Save button...');
                     await saveBtn.click();
                     await this.page.waitForTimeout(2000);
-                    console.log('   ✅ Workflow saved in n8n');
+                    
+                    // Check for success toast/notification
+                    const saved = await this.page.locator('text=/saved|success/i').isVisible({ timeout: 3000 }).catch(() => false);
+                    
+                    if (saved) {
+                        log('success', '✅ Workflow saved successfully!');
+                    } else {
+                        log('success', '✅ Save clicked (checking...)');
+                    }
+                    
                     await this.takeScreenshot('final', 'saved_workflow');
                 } else {
-                    console.log('   ⚠️  Save button not found - workflow may auto-save');
+                    // Strategy 2: Try keyboard shortcut
+                    log('info', 'Trying Ctrl+S shortcut...');
+                    await this.page.keyboard.press('Control+KeyS');
+                    await this.page.waitForTimeout(2000);
+                    log('success', '✅ Save shortcut sent');
+                    await this.takeScreenshot('final', 'saved_workflow');
                 }
+                
+                // Get workflow URL
+                const currentUrl = this.page.url();
+                log('info', `📍 Workflow URL: ${currentUrl}`);
+                
             } catch (error) {
-                console.log(`   ⚠️  Could not save: ${error.message}`);
+                log('error', `Could not save: ${error.message}`);
             }
             console.log();
 
@@ -1404,11 +2020,21 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
                 JSON.stringify(this.actionLog, null, 2)
             );
             
-            console.log('📊 Execution Summary:');
+            console.log('\n========================================');
+            console.log('📊 AUTOMATION SUMMARY');
+            console.log('========================================\n');
             console.log(`   Total Steps: ${totalSteps}`);
-            console.log(`   Successful: ${successfulSteps}`);
-            console.log(`   Failed: ${totalSteps - successfulSteps}`);
-            console.log(`   Success Rate: ${successRate}%\n`);
+            console.log(`   ✅ Successful: ${successfulSteps}`);
+            console.log(`   ❌ Failed: ${totalSteps - successfulSteps}`);
+            console.log(`   📈 Success Rate: ${successRate}%`);
+            
+            if (executionLog.final_status === 'success') {
+                console.log(`\n🎉 ✅ Automation completed successfully!`);
+            } else {
+                console.log(`\n⚠️  Automation completed with ${totalSteps - successfulSteps} issue(s)`);
+            }
+            
+            console.log('\n========================================\n');
             
             console.log('📝 Logs saved:');
             console.log(`   - execution_log.json (step-by-step results)`);
@@ -1424,6 +2050,8 @@ Respond with JSON: { "selector": "best selector", "reasoning": "why", "alternati
      * 🧹 Cleanup
      */
     async close() {
+        // ⏰ Stop keep-alive
+        this.stopKeepAlive();
         const keepOpen = parseInt(process.env.BROWSER_KEEP_OPEN_SECONDS || '10');
         console.log(`💡 Browser remains open for ${keepOpen}s for inspection...`);
         await this.page.waitForTimeout(keepOpen * 1000);

@@ -1,0 +1,91 @@
+{
+  "workflow_name": "WhatsApp AI Agent with OpenRouter",
+  "connections": [
+    {
+      "id": "conn1",
+      "from_node": "WhatsApp Trigger",
+      "to_node": "AI Agent",
+      "connection_type": "main",
+      "description": "Trigger sends messages to AI Agent",
+      "strategy": {
+        "source_handle": "output_circle",
+        "target_handle": "input_circle",
+        "position": "right_to_left"
+      }
+    },
+    {
+      "id": "conn2",
+      "from_node": "OpenRouter Chat Model",
+      "to_node": "AI Agent",
+      "connection_type": "ai_languageModel",
+      "description": "Chat Model connects to AI Agent's Chat Model slot (+ icon at bottom)",
+      "strategy": {
+        "source_handle": "output_main",
+        "target_handle": "tool_plus_icon",
+        "position": "bottom_to_top",
+        "special": "connect_to_plus_icon_labeled_chat_model"
+      }
+    },
+    {
+      "id": "conn3",
+      "from_node": "AI Agent",
+      "to_node": "Send message",
+      "connection_type": "main",
+      "description": "AI Agent output to Send message action",
+      "strategy": {
+        "source_handle": "output_circle",
+        "target_handle": "input_rectangle",
+        "position": "right_to_left"
+      }
+    }
+  ],
+  "node_shapes": {
+    "WhatsApp Trigger": {
+      "shape": "d_shape_left",
+      "output_handle": "circle_right_side",
+      "has_plus_icon": false
+    },
+    "AI Agent": {
+      "shape": "rectangle",
+      "input_handle": "circle_left_side",
+      "output_handle": "circle_right_side",
+      "plus_icons": [
+        {
+          "label": "Chat Model",
+          "type": "ai_languageModel",
+          "position": "bottom_center"
+        },
+        {
+          "label": "Tool",
+          "type": "ai_tool",
+          "position": "bottom_right"
+        },
+        {
+          "label": "Memory",
+          "type": "ai_memory",
+          "position": "bottom_left"
+        }
+      ]
+    },
+    "OpenRouter Chat Model": {
+      "shape": "rounded_rectangle",
+      "output_handle": "circle_right_side",
+      "connects_to": "AI Agent Chat Model slot"
+    },
+    "Send message": {
+      "shape": "d_shape_right",
+      "input_handle": "rectangle_left_side",
+      "has_plus_icon": false
+    }
+  },
+  "validation": {
+    "expected_connections": 3,
+    "required_nodes": [
+      "WhatsApp Trigger",
+      "AI Agent",
+      "OpenRouter Chat Model",
+      "Send message"
+    ]
+  }
+}
+

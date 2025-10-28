@@ -32,9 +32,18 @@ backend/output/*.log
 backend/output/debug/
 backend/output/screenshots/
 backend/automation/output/
+backend/analyzerYT/output/
+backend/automationYT/output/
+backend/automation/connection_test/screenshots/
 
 # Root level temp files
 dump.txt
+
+# Documentation files (only keep main README)
+*.md
+!README.md
+**/README.md
+**/*.md
 
 # Unused/legacy files
 backend/RUN.bat
@@ -187,9 +196,9 @@ temp_*.*
 # Keep all JavaScript source files
 !**/*.js
 
-# Keep all documentation
-!**/*.md
-!**/*.txt
+# Keep requirements only (NO documentation)
+# !**/*.md  # Disabled - no MD files
+# !**/*.txt  # Disabled - no TXT files
 
 # Keep requirements & config
 !requirements.txt
