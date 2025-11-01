@@ -793,6 +793,19 @@ Return JSON:
             }
         }
 
+        // 💾 SAVE WORKFLOW
+        log('info', '\n========================================');
+        log('info', '💾 SAVING WORKFLOW');
+        log('info', '========================================\n');
+        
+        const saved = await this.saveWorkflow(plan.workflow_name || 'AI Generated Workflow');
+        
+        if (saved) {
+            log('success', '✅ Workflow saved successfully');
+        } else {
+            log('warn', '⚠️ Could not save workflow (you can save manually)');
+        }
+
         // Summary
         const total = this.executionLog.steps.length;
         const successful = this.executionLog.steps.filter(s => s.status === 'success').length;
@@ -814,12 +827,18 @@ Return JSON:
             successful, 
             failed: total - successful, 
             success_rate: successRate,
-            auto_connected: true
+            auto_connected: true,
+            workflow_saved: saved
         };
         
         // Add comparison result to log
         if (comparisonResult) {
             this.executionLog.comparison = comparisonResult;
+        }
+        
+        // Add workflow URL to log
+        if (saved) {
+            this.executionLog.workflow_url = this.page.url();
         }
         
         await writeFile(
@@ -828,6 +847,85 @@ Return JSON:
         );
         
         log('success', 'Execution log saved\n');
+    }
+
+    /**
+     * 💾 Save workflow in n8n
+     */
+    async saveWorkflow(workflowName) {
+        try {
+            log('info', `Saving workflow: "${workflowName}"`);
+            
+            // Wait for any pending UI updates
+            await this.page.waitForTimeout(1500);
+            
+            // Strategy 1: Try Ctrl+S keyboard shortcut (fastest)
+            try {
+                await this.page.keyboard.press('Control+KeyS');
+                await this.page.waitForTimeout(2000);
+                
+                // Check for success notification
+                const savedNotification = await this.page.locator('text=/saved|success/i').isVisible({ timeout: 3000 }).catch(() => false);
+                
+                if (savedNotification) {
+                    log('success', 'Saved via Ctrl+S shortcut');
+                    
+                    // Get workflow URL
+                    const currentUrl = this.page.url();
+                    log('info', `Workflow URL: ${currentUrl}`);
+                    
+                    return true;
+                }
+            } catch (e) {
+                log('debug', `Ctrl+S failed: ${e.message}`);
+            }
+            
+            // Strategy 2: Try Save button
+            try {
+                const saveBtn = this.page.locator('button:has-text("Save")').first();
+                const isSaveVisible = await saveBtn.isVisible({ timeout: 3000 }).catch(() => false);
+                
+                if (isSaveVisible) {
+                    await saveBtn.click();
+                    await this.page.waitForTimeout(2000);
+                    
+                    // Check for success
+                    const saved = await this.page.locator('text=/saved|success/i').isVisible({ timeout: 3000 }).catch(() => false);
+                    
+                    if (saved) {
+                        log('success', 'Saved via Save button');
+                        
+                        // Get workflow URL
+                        const currentUrl = this.page.url();
+                        log('info', `Workflow URL: ${currentUrl}`);
+                        
+                        return true;
+                    }
+                }
+            } catch (e) {
+                log('debug', `Save button failed: ${e.message}`);
+            }
+            
+            // Strategy 3: Look for "Saved" status indicator
+            const alreadySaved = await this.page.locator('text=/saved/i').isVisible({ timeout: 2000 }).catch(() => false);
+            
+            if (alreadySaved) {
+                log('info', 'Workflow already saved (auto-save active)');
+                
+                // Get workflow URL
+                const currentUrl = this.page.url();
+                log('info', `Workflow URL: ${currentUrl}`);
+                
+                return true;
+            }
+            
+            log('warn', 'Could not confirm save status');
+            return false;
+            
+        } catch (error) {
+            log('error', `Save workflow failed: ${error.message}`);
+            return false;
+        }
     }
 
     /**
